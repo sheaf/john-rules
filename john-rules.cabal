@@ -1,0 +1,61 @@
+cabal-version:      3.4
+name:               john-rules
+version:            0.1.0.0
+license:            BSD-3-Clause
+author:             sheaf
+maintainer:         sheaf
+category:           Distribution
+build-type:         Simple
+extra-doc-files:    readme.md, design-notes.md
+
+common common
+
+  build-depends:
+    base
+      >= 4.18 && < 5
+
+  ghc-options:
+    -Wall
+
+  default-extensions:
+    BlockArguments
+    DeriveAnyClass
+    DeriveGeneric
+    DerivingStrategies
+    FlexibleInstances
+    GeneralisedNewtypeDeriving
+    LambdaCase
+    NamedFieldPuns
+    RankNTypes
+    TupleSections
+    TypeApplications
+
+library
+
+  import:
+    common
+
+  hs-source-dirs:
+    src
+
+  exposed-modules:
+    CabalStubs
+    Examples
+    Rules
+
+  default-language:
+    Haskell2010
+
+  build-depends:
+    , binary
+        >= 0.8   && < 0.9
+    , bytestring
+        >= 0.11  && < 0.13
+    , containers
+        >= 0.6   && < 0.9
+    , filepath
+        >= 1.4   && < 1.6
+    , text
+        >= 2.0   && < 2.2
+    , transformers
+        >= 0.6   && < 0.7
