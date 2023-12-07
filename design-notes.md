@@ -3,11 +3,11 @@
 
 ## What additional arguments should be passed when executing rules?
 
-When registering a preprocessor, you say "I care about `.x` files"
-Then Cabal goes looking for `.x` files in various places, and then passes
+When registering a preprocessor, you say "I care about `.x` files".
+Then Cabal goes looking for `.x` files in various places, and passes
 this information onto the preprocessor:
-  - `(some search dir, filename)` for the `.x` file we found
-  - `(some build dir, filename)` for where to put the output
+  - `(some search dir, filename)` for the `.x` file we found,
+  - `(some build dir, filename)` for where to put the output.
 
 In practice, Cabal goes searching in the following dirs:
 
@@ -29,6 +29,28 @@ or
 
 ```haskell
 componentBuildDir lbi clbi = buildDir lbi </> nm'
+```
+
+This motivates the idea that, when declaring a rule, we should be able to
+specify a dependency on e.g. a Haskell module, and when executing the rule
+Cabal will resolve the dependency (by finding a base directory among its
+search directories) and pass this information to the action that executes
+the rule. As for outputs of a rule, these should only ever be put in
+`autogenComponentModulesDir` or `componentBuildDir`, and the rule should declare
+this choice ahead of time. (It would also be possible to let the build system
+choose the output directory entirely.)
+
+This is why we have:
+
+```haskell
+data Dependency
+  = ProjectFile !FilePath
+  | RuleResult !RuleResultRef
+type ResolvedDependency = ( FilePath, FilePath )
+
+data Result
+  = AutogenFile !FilePath
+  | BuildFile !FilePath
 ```
 
 ## Splitting off `Rule` and `Action`
