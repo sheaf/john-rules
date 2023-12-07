@@ -49,11 +49,9 @@ import Data.Binary
 import Data.Map.Strict
   ( Map )
 import qualified Data.Map.Strict as Map
-  ( empty, insert, lookupMax )
+  ( empty, insert, lookupMax, unionWithKey )
 
 -- transformers
-import Control.Monad.IO.Class
-  ( MonadIO )
 import Control.Monad.Trans.Class
   ( MonadTrans )
 import Control.Monad.Trans.State.Strict
@@ -203,10 +201,34 @@ data Rules inputs outputs
     -- be running @happy@, another running @alex@.
   }
 
+instance Semigroup outputs => Semigroup ( Rules inputs outputs ) where
+  ( Rules { rules = rs1, actions = as1 } )
+    <>
+      ( Rules { rules = rs2, actions = as2 } )
+    = Rules
+      { rules = \ inputs -> do
+         outputs1 <- rs1 inputs
+         outputs2 <- rs2 inputs
+         return $ outputs1 <> outputs2
+      , actions = \ inputs ->
+          let acts1 = as1 inputs
+              acts2 = as2 inputs
+          in
+            Map.unionWithKey dupActionError acts1 acts2
+        }
+    where
+      dupActionError actId _ _ =
+        error $ "Duplicate action " ++ show actId
+instance Monoid outputs => Monoid ( Rules inputs outputs ) where
+  mempty = Rules
+    { rules   = \ _ -> pure mempty
+    , actions = \ _ -> Map.empty
+    }
+
 -- | A monad that allows registering 'Rule's using 'registerRule',
 -- through the creation of fresh 'RuleId's.
 newtype FreshT m a = FreshT { runFreshT :: StateT ( Map RuleId Rule ) m a }
-  deriving newtype ( Functor, Applicative, Monad, MonadTrans, MonadIO, MonadFix )
+  deriving newtype ( Functor, Applicative, Monad, MonadTrans, MonadFix )
 type RulesM = FreshT SmallIO
 
 -- These newtypes are placeholders meant to help keep track of effects
@@ -241,7 +263,7 @@ they would be computed in the monad for the 'actions' field.
 
 -- | PreBuildRules declare how a certain collection of modules in a
 -- given component of a package will be generated.
-type PreBuildRules = Rules PreBuildComponentInputs ()
+type PreBuildRules = Rules PreBuildComponentInputs () -- ( Map ModuleName RuleId )
 
 --------------------------------------------------------------------------------
 -- API functions
@@ -254,13 +276,13 @@ hoist :: ( forall x. n x -> m x )
 hoist h ( FreshT ( StateT f ) ) = FreshT $ StateT $ \ s -> h $ f s
 
 registerRule :: Monad m => Rule -> FreshT m RuleId
-registerRule rule = do
-  oldRules <- FreshT get
+registerRule rule = FreshT do
+  oldRules <- get
   let newId
         | Just ( RuleId i, _ ) <- Map.lookupMax oldRules
         = RuleId ( i + 1)
         | otherwise
         = RuleId 1
       !newRules = Map.insert newId rule oldRules
-  FreshT $ put newRules
+  put newRules
   return newId
