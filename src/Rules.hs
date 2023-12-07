@@ -1,35 +1,58 @@
-module Rules where
+-- |
+-- Module: Rules
+--
+-- This module defines an API for fine-grained rules, e.g. pre-build rules
+-- for generating source Haskell modules.
+--
+-- Rules are allowed to depend on source files (e.g. a source @.x@ file),
+-- as well as on the output of other rules.
+--
+module Rules
+  ( -- * Rules
+    -- ** Rule
+    Rule(..), RuleId(..), RuleResultRef(..)
+
+    -- ** Rule inputs/outputs
+  , Dependency(..), Result(..)
+
+   -- ** Collections of rules
+  , Rules(..), PreBuildRules
+
+  -- * Actions
+  , Action(..), ActionId(..), ResolvedDependency
+
+  -- * Rules API
+  , SmallIO(..), BigIO(..), FreshT
+  , registerRule, runRulesM, liftFresh, hoist
+
+  -- ** Debugging
+  , getRules
+  )
+  where
 
 -- base
-import Data.Foldable
-  ( for_ )
-import Data.Maybe
-  ( listToMaybe, mapMaybe )
+import Control.Monad.Fix
+  ( MonadFix )
 import Data.Word
   ( Word64 )
 import GHC.Generics
   ( Generic )
-import System.Environment
-  ( getArgs )
 
 -- binary
 import Data.Binary
   ( Binary )
-import qualified Data.Binary as Binary
-  ( encode, decode )
-
--- bytestring
-import qualified Data.ByteString.Lazy as LBS
-  ( getContents, putStr )
 
 -- containers
-import qualified Data.Graph as Graph
 import Data.Map.Strict
   ( Map )
 import qualified Data.Map.Strict as Map
-  ( assocs, empty, insert, lookup, lookupMax )
+  ( empty, insert, lookupMax )
 
 -- transformers
+import Control.Monad.IO.Class
+  ( MonadIO )
+import Control.Monad.Trans.Class
+  ( MonadTrans )
 import Control.Monad.Trans.State.Strict
   ( StateT(..), get, put )
 
@@ -53,22 +76,40 @@ newtype ActionId = ActionId Word64
 --
 --   - its dependencies (which specifies when the rule should be re-run);
 --     see t'Dependency';
---   - the 'Action' to run to execute the rule, referenced by 'ActionId'
---   - additional data that the 'Action' needs to be given.
+--   - a description of what kind of results it will produce (see t'Result');
+--   - the 'Action' to run to execute the rule, referenced by 'ActionId'.
+--
+-- Each 'Dependency' will get resolved to the build system into a
+-- 'ResolvedDependency', and these will be passed as additional arguments to the
+-- action.
+--
+-- **Requirements:** the 'Action' whose 'ActionId' is stored in the 'actionId'
+-- field of a 'Rule' must satisfy the following requirements:
+--
+--   - the 'Action' expects exactly as many 'ResolvedDependency' arguments
+--     as there are 'Dependency' values stored in the 'dependencies'
+--     field of the 'Rule's;
+--   - the action must produce precisely the 'Result's specified by the
+--     'results' field of the 'Rule'.
 data Rule = Rule
   { dependencies :: ![ Dependency ]
-     -- ^ dependencies of this rule; see t'Dependency'
+     -- ^ Dependencies of this rule; see t'Dependency'.
   , results :: ![ Result ]
-     -- ^ results of this rule; see t'Result'
+     -- ^ Results of this rule; see t'Result'.
   , actionId :: !ActionId
-     -- ^ to run this rule, which 'Action' should we execute?
+     -- ^ To run this rule, which 'Action' should we execute?
+     --
+     -- The 'Action' will receive exactly as many 'ResolvedDependency'
+     -- arguments as 'Dependency' values are stored in 'dependencies'.
   }
   deriving stock ( Generic, Show )
   deriving anyclass Binary
 
 -- | A dependency of a rule, which specifies when to re-run the rule.
 --
--- Rules can depend either on a source file, or the output of another rule.
+-- Rules can depend either on a source file, or on the output of another rule.
+--
+-- A 'Dependency' gets resolved into a 'ResolvedDependency' by the build system.
 data Dependency
   -- | Declare a dependency on a source file from the current project,
   -- e.g. the path to a Happy @.y@ file from the project.
@@ -81,7 +122,24 @@ data Dependency
   deriving stock ( Generic, Show )
   deriving anyclass Binary
 
-type ResolvedDependency = (FilePath, FilePath)
+-- | A resolved dependency, consisting of a base path and of
+-- a file path relative to that base path.
+--
+-- In practice, this will be something like @( srcDir, toFilePath modName )@,
+-- where @srcDir@ is one of the Cabal search directories.
+type ResolvedDependency = ( FilePath, FilePath )
+  -- The reason for splitting it up this way is that some pre-processors don't
+  -- simply generate one output @.hs@ file from one input file, but have
+  -- dependencies on other generated files (notably @c2hs@, where building one
+  -- @.hs@ file may require reading other @.chi@ files, and then compiling the
+  -- @.hs@ file may require reading a generated @.h@ file).
+  -- In these cases, the generated files need to embed relative path names to each
+  -- other (eg the generated @.hs@ file mentions the @.h@ file in the FFI imports).
+  -- This path must be relative to the base directory where the generated files
+  -- are located; it cannot be relative to the top level of the build tree because
+  -- the compilers do not look for @.h@ files relative to there, ie we do not use
+  -- @-I .@, instead we use @-I dist/build@ (or whatever dist dir has been set
+  -- by the user).
 
 -- | A description of the location of the file generated by executing a rule.
 data Result
@@ -108,33 +166,48 @@ data RuleResultRef =
 -- | An action to run to execute a 'Rule', for example an invocation
 -- to an external executable such as @happy@ or @alex@.
 --
--- The additional argument is used to specify information that depends on
--- the particular rule being run, for example the module name being compiled.
+-- The 'Action' gets passed precisely as many 'ResolvedDependency' values
+-- as the 'Rule' that calls it specifies 'Dependency' values.
+--
+-- **Requirement:** outputs of this action should be put in either
+-- @autogenComponentModulesDir@ or @componentBuildDir@, as specified by the
+-- 'Result's stored in the 'Rule' that stored the 'ActionId' that refers to
+-- this 'Action'.
 data Action =
   Action
-    { action :: [ResolvedDependency] -> BigIO () }
-  -- Outputs of this action should be put in either autogenComponentModulesDir
-  -- or componentBuildDir (modulo the "-tmp" issue),
-  -- as specified by the 'Result's stored in the 'Rule' that stored
-  -- the 'ActionId' that refers to this 'Action'.
+    { action :: [ ResolvedDependency ] -> BigIO () }
 
 -- | A collection of 'Rule's and 'Actions' for executing them.
 --
 -- The @inputs@ type parameter represents an extra argument, which usually
--- consists of information known to Cabal such as a 'LocalBuildInfo' and a
+-- consists of information known to Cabal such as 'LocalBuildInfo' and
 -- 'ComponentLocalBuildInfo'.
+--
+-- The @outputs@ type parameter represents what the rules are generating,
+-- for example a map from Haskell source module to the 'Rule' that generates it.
+--
+-- Even though 'Rule's and 'Action's are specified separately, they must jointly
+-- satisfy some preconditions (see t'Rule'):
+--
+--  - the action called by a rule should expect as many arguments as
+--    the rule declares dependencies;
+--  - the action called by a rule should output the results described by
+--    the rule.
 data Rules inputs outputs
   = Rules
-  { actions :: inputs -> Map ActionId Action
-    -- ^ All actions that we can execute. For example, one action could
-    -- be running @happy@, another running @alex@.
-  , rules :: inputs -> RulesM outputs
+  { rules :: inputs -> RulesM outputs
     -- ^ The rules: a collection of 'RuleId's, and for each 'RuleId'
     -- a corresponding 'Rule' which specifies its dependencies and
     -- the action to run in order to execute the rule.
+  , actions :: inputs -> Map ActionId Action
+    -- ^ All actions that we can execute. For example, one action could
+    -- be running @happy@, another running @alex@.
   }
 
-type FreshT = StateT ( Map RuleId Rule )
+-- | A monad that allows registering 'Rule's using 'registerRule',
+-- through the creation of fresh 'RuleId's.
+newtype FreshT m a = FreshT { runFreshT :: StateT ( Map RuleId Rule ) m a }
+  deriving newtype ( Functor, Applicative, Monad, MonadTrans, MonadIO, MonadFix )
 type RulesM = FreshT SmallIO
 
 -- These newtypes are placeholders meant to help keep track of effects
@@ -144,10 +217,15 @@ newtype BigIO a = BigIO { runBigIO :: IO a }
 newtype SmallIO a = SmallIO { runSmallIO :: IO a }
   deriving newtype ( Functor, Applicative, Monad )
 
-
-
 runRulesM :: FreshT m a -> m ( a, Map RuleId Rule )
-runRulesM = ( `runStateT` Map.empty )
+runRulesM = ( `runStateT` Map.empty ) . runFreshT
+
+-- | Convenience function to return all 'Rule's stored in 'Rules'.
+--
+-- Useful for debugging.
+getRules :: inputs -> Rules inputs outputs -> IO ( outputs, Map RuleId Rule )
+getRules inputs ( Rules { rules = rulesFromInputs } ) =
+  runSmallIO $ runRulesM $ rulesFromInputs inputs
 
 {- TODO: don't let users create the ActionIds themselves.
 
@@ -165,116 +243,26 @@ they would be computed in the monad for the 'actions' field.
 -- | PreBuildRules declare how a certain collection of modules in a
 -- given component of a package will be generated.
 type PreBuildRules = Rules PreBuildComponentInputs ( Map ModuleName RuleId )
-
---------------------------------------------------------------------------------
--- External Hooks executable
-
--- | Create an executable which accepts the name of a hook as the argument,
--- then reads arguments to the hook over stdin and writes the results of the hook
--- to stdout.
-hooksExecutable :: PreBuildRules -> IO ()
-hooksExecutable preBuildRules = do
-  args <- getArgs
-  case args of
-    [] -> error "hooksExecutable: missing argument"
-    hookName:_ ->
-      case hookName of
-        "runPreBuildAction" ->
-          -- Execute a pre-build action, given its ActionId and ActionArg.
-          runHookHandle
-            \ (cabalBuildInfoStuff, actId, actionArgData) -> do
-            let allActions = actions preBuildRules cabalBuildInfoStuff
-            case Map.lookup actId allActions of
-              Nothing -> error $ "hooksExecutable: no such action " ++ show actId
-              Just ( Action f ) ->
-                runBigIO $ f ( Binary.decode actionArgData )
-        "preBuildRules" ->
-          -- Query all pre-build rules.
-          -- Returns:
-          --   - a map that says which rule to run to generate it (Map ModuleName RuleId)
-          --   - for each rule, what its dependencies are, and what Action to run to execute it
-          runHookHandle
-            \ cabalBuildInfoStuff -> do
-              runSmallIO $ runRulesM (rules preBuildRules cabalBuildInfoStuff)
-        _ -> error $ "hooksExecutable: invalid hook name " ++ hookName
-
-runPreBuildRules
-  :: PreBuildComponentInputs
-  -> ( PreBuildComponentInputs -> ActionId -> [ResolvedDependency] -> IO () )
-    -- ^ how to run an individual action
-  -> ( PreBuildComponentInputs -> IO ( Map ModuleName RuleId, Map RuleId Rule ) )
-    -- ^ all pre-build rules
-  -> IO ()
-runPreBuildRules buildInfoStuff runAction getRules = do
-  ( _modRules, ruleFromId ) <- getRules buildInfoStuff
-  let
-    ( ruleGraph, ruleFromVertex, _vertexIdFromRuleId ) =
-      Graph.graphFromEdges
-        [ ( rule, rId, ruleDeps )
-        | ( rId, rule@( Rule { dependencies = allDeps } ) ) <- Map.assocs ruleFromId
-        , let ruleDeps =
-                mapMaybe
-                  ( \case { RuleResult ( RuleResultRef { ruleId = i } ) -> Just i; ProjectFile {} -> Nothing} )
-                   allDeps
-        ]
-    resolveDep :: RuleId -> Dependency -> IO ResolvedDependency
-    resolveDep baseRuleId = \case
-      ProjectFile fp -> do
-        basePath <- error "TODO: look for fp in the search paths and find the base path" buildInfoStuff fp
-        return (basePath, fp)
-      RuleResult ( RuleResultRef { ruleId = depRuleId, ruleResultIndex = i } ) ->
-        case Map.lookup depRuleId ruleFromId of
-          Nothing -> error $ "runPreBuildRules: rule " ++ show baseRuleId ++ " depends on non-existent rule " ++ show depRuleId
-          Just ( Rule { results = depResults }) ->
-            case listToMaybe $ drop ( fromIntegral i ) depResults of
-              Nothing -> error $ unlines
-                [ "runPreBuildRules: rule " ++ show baseRuleId ++ " depends on output " ++ show i ++ "of rule " ++ show depRuleId ++ ","
-                , "but that rule only has " ++ show (length depResults) ++ " outputs." ]
-              Just res -> case res of
-                AutogenFile fp -> return (error "autogenComponentModulesDir", fp)
-                BuildFile fp -> return (error "componentBuildDir", fp)
-
-  for_ ( Graph.reverseTopSort ruleGraph ) \ v -> do
-    let ( Rule { actionId = actId, dependencies = deps }, rId, _ ) = ruleFromVertex v
-    resolvedDeps <- traverse (resolveDep rId) deps
-    runAction buildInfoStuff actId resolvedDeps
-
-  -- On-demand recompilation: when some of the 'ProjectFile' inputs
-  -- specified in the 'ruleFromId' map are modified:
-  --   - rerun 'getRules' (as the dependency graph may have changed)
-  --   - execute the part of the build graph that is now stale
-
--- | Run a hook executable, passing inputs via stdin
--- and getting results from stdout.
-runHookHandle
-  :: ( Binary inputs, Binary outputs )
-  => ( inputs -> IO outputs )
-  -- ^ Hook to run; inputs are passed via stdin
-  -> IO ()
-runHookHandle hook = do
-  inputsData <- LBS.getContents
-  let inputs = Binary.decode inputsData
-  output <- hook inputs
-  LBS.putStr (Binary.encode output)
+  -- TODO: what if we want a rule to generate an @hs-boot@ file?
 
 --------------------------------------------------------------------------------
 -- API functions
 
 liftFresh :: Functor m => m a -> FreshT m a
-liftFresh f = StateT $ \ s -> (,s) <$> f
+liftFresh f = FreshT $ StateT $ \ s -> ( , s ) <$> f
 
 hoist :: ( forall x. n x -> m x )
       -> FreshT n a -> FreshT m a
-hoist h ( StateT f ) = StateT $ \ s -> h $ f s
+hoist h ( FreshT ( StateT f ) ) = FreshT $ StateT $ \ s -> h $ f s
 
 registerRule :: Monad m => Rule -> FreshT m RuleId
-registerRule rule =
-  do { oldRules <- get
-     ; let newId
-             | Just (RuleId i, _) <- Map.lookupMax oldRules
-             = RuleId (i+1)
-             | otherwise
-             = RuleId 1
-     ; put $ Map.insert newId rule oldRules
-     ; return newId
-     }
+registerRule rule = do
+  oldRules <- FreshT get
+  let newId
+        | Just ( RuleId i, _ ) <- Map.lookupMax oldRules
+        = RuleId ( i + 1)
+        | otherwise
+        = RuleId 1
+      !newRules = Map.insert newId rule oldRules
+  FreshT $ put newRules
+  return newId

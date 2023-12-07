@@ -1,5 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+-- |
+-- Module: Examples
+--
+-- This module implements common patterns found in Custom Setup scripts in
+-- terms of the fine-grained rules defined in this package.
 module Examples where
 
 -- base
@@ -90,12 +95,6 @@ chsRulesFromGraph chsActionId chsGraph =
                       ]
           , actionId = chsActionId
           }
-
-
-
-
-
-
 
 -----------------------------------
 -- Stub functions for the examples.
