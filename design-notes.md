@@ -43,21 +43,23 @@ data Rule =
     , actionId :: !ActionId
     }
 
-data Action = Action { action :: [ResolvedDependency] -> IO () }
+data Action = Action { action :: [ ResolvedDependency ] -> IO () }
 ```
 
-If we remove the indirection `Rule -> ActionId -> Action`, this boils down to:
+If we remove the indirection `Rule -> ActionId -> Action`, and make explicit
+the output of the action (by having it return the results rather than
+writing them to disk in specific locations), this boils down to:
 
 ```haskell
 data
   Rule
     { dependencies :: ![ Dependency ]
     , results :: ![ Result ]
-    , actionId :: [ ResolvedDependency ] -> IO [ Result ]
+    , runAction :: [ ResolvedDependency ] -> IO [ ResultArtifact ]
     }
 ```
 
-with the length of dependencies and of results matching.
+with the length of dependencies and of results matching.  
 What's happening is that we declare dependencies, on either a path like
 `"Lib.Mod.y"` or the output of another rule, and Cabal will resolve this
 dependency, finding the full filepath of this dependency.
@@ -83,8 +85,8 @@ datatype, we separately compute `Action`s and `Rule`s:
 ```haskell
 data Rules inputs outputs
   = Rules
-  { actions :: inputs -> Map ActionId Action
-  , rules :: inputs -> RulesM outputs
+  { rules :: inputs -> RulesM outputs
+  , actions :: inputs -> Map ActionId Action
   }
 ```
 
