@@ -49,6 +49,21 @@ data Result
 type ResolvedLocation = ( FilePath, FilePath )
 ```
 
+Note that rules are only allowed to depend on file paths, and not directly on
+other rules. The reason for this is two-fold:
+
+  1. If a rule needs e.g. a certain `".chi"` file to exist, it is
+     better to declare that upfront rather than indirectly by
+     knowing which other rule generates it.
+     This means the system is more robust, as if some internal detail changes
+     which means that a different rule now generates the `".chi"` file,
+     everything should continue to work.
+  2. Because `RuleId`s are local names generated internally in the
+     `RulesM` monad, if the rule that generates the file we need
+     was defined somewhere else, then if we wanted to depend on the rule itself
+     we would have to go search through existing rules to find the `RuleId` of
+     the `Rule` that generates it; that would be rather indirect and annoying.
+
 ## Splitting off `Rule` and `Action`
 
 Currently:
