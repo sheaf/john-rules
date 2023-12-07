@@ -8,8 +8,10 @@
 module Examples where
 
 -- base
-import Control.Monad.Fix
-  ( mfix )
+import Control.Monad
+  ( void )
+import Data.Foldable
+  ( for_ )
 import Data.Functor.Identity
   ( Identity(..) )
 
@@ -17,7 +19,7 @@ import Data.Functor.Identity
 import Data.Map.Strict
   ( Map )
 import qualified Data.Map.Strict as Map
-  ( (!), fromList, traverseWithKey )
+  ( fromList, toList )
 import Data.Set
   ( Set )
 import qualified Data.Set as Set
@@ -25,7 +27,7 @@ import qualified Data.Set as Set
 
 -- filepath
 import System.FilePath
-  ( (<.>) )
+  ( (<.>), (</>) )
 
 -- john-rules
 import CabalStubs
@@ -41,20 +43,18 @@ import Rules
 
 stackRules :: PreBuildRules
 stackRules = Rules
-  { actions = \ buildInfoStuff ->
+  { actions = \ _ ->
       let
         genBuildModAction =
-          Action $ \ _ -> writeStackBuildFile buildInfoStuff
+          Action $ \ _ (stackBuildLoc:_) -> writeStackBuildFile stackBuildLoc
       in Map.fromList [ ( genBuildModActionId, genBuildModAction ) ]
-  , rules = \ buildInfoStuff -> do
-      genStackBuildRuleId <- registerRule $
+  , rules = \ buildInfoStuff ->
+      void $ registerRule $
         Rule
           { dependencies = []
           , actionId = genBuildModActionId
           , results = [ AutogenFile $ toFilePath (stackBuildModule buildInfoStuff) ]
           }
-      return $ Map.fromList
-        [ (stackBuildModule buildInfoStuff, genStackBuildRuleId) ]
   }
   where
     genBuildModActionId = ActionId 1
@@ -66,8 +66,8 @@ chsRules = Rules
   { actions = \ buildInfoStuff ->
       let
         runChsAction =
-          Action $ \ (chsFileLoc:_chiFileLocs) ->
-            runChs buildInfoStuff chsFileLoc
+          Action $ \ (inputChsLoc:_inputChiLocs) (outputHsLoc:outputChiLoc:_) ->
+            runChs buildInfoStuff inputChsLoc outputHsLoc outputChiLoc
       in Map.fromList [ ( chsActionId, runChsAction ) ]
   , rules = \ buildInfoStuff -> do
       chsGraph <- liftFresh $ callChsForDeps buildInfoStuff
@@ -78,17 +78,17 @@ chsRules = Rules
 
 chsRulesFromGraph :: ActionId
                   -> Map ModuleName (Set ModuleName)
-                  -> FreshT Identity (Map ModuleName RuleId)
+                  -> FreshT Identity ()
 chsRulesFromGraph chsActionId chsGraph =
-  mfix $ \ mods ->
-    flip Map.traverseWithKey chsGraph \ chsMod chiDeps -> do
+--mfix $ \ mods ->
+    for_ (Map.toList chsGraph) \ (chsMod, chiDeps) -> do
       let modPath = toFilePath chsMod <.> "chs"
       registerRule $
         Rule
           { dependencies = ProjectFile modPath
-                         : [ RuleResult $ RuleResultRef { ruleId = depId, ruleResultIndex = 1 }
+                         : [ ProjectFile $ toFilePath chiDep <.> "chi"
                            | chiDep <- Set.toList chiDeps
-                           , let depId = mods Map.! chiDep
+                        -- , let depId = mods Map.! chiDep
                            ]
           , results = [ AutogenFile $ toFilePath chsMod <.> "hs"
                       , BuildFile $ toFilePath chsMod <.> "chi"
@@ -100,9 +100,9 @@ chsRulesFromGraph chsActionId chsGraph =
 -- Stub functions for the examples.
 
 -- Example 1: ex-nihilo module generation (stack).
-writeStackBuildFile :: PreBuildComponentInputs -> BigIO ()
-writeStackBuildFile _ = BigIO $
-  putStrLn "Stub: I will write Build_Stack.hs"
+writeStackBuildFile :: ResolvedLocation -> BigIO ()
+writeStackBuildFile (modDir, modNm) = BigIO $
+  putStrLn $ "Stub: I will write Build_Stack.hs to " ++ (modDir </> modNm)
 
 stackBuildModule :: PreBuildComponentInputs -> ModuleName
 stackBuildModule _ = ModuleName "Build_Stack"
@@ -121,9 +121,11 @@ callChsForDeps _ = SmallIO $ do
       ]
 
 runChs :: PreBuildComponentInputs
-       -> ResolvedDependency -- ^ input @.chs@ file
+       -> ResolvedLocation -- ^ location of input @.chs@ file
+       -> ResolvedLocation -- ^ desired location of output @.hs@ file
+       -> ResolvedLocation -- ^ desired location of output @.chi@ file
        -> BigIO ()
-runChs _buildInfoStuff (_baseDir, _chsPath) = BigIO $
+runChs _buildInfoStuff _ _ _ = BigIO $
   putStrLn $ unlines
     [ "Stub call to 'c2hs' executable."
     -- The file on which to call "c2hs" is: baseDir </> chsPath <.> "chs"

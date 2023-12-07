@@ -35,22 +35,18 @@ This motivates the idea that, when declaring a rule, we should be able to
 specify a dependency on e.g. a Haskell module, and when executing the rule
 Cabal will resolve the dependency (by finding a base directory among its
 search directories) and pass this information to the action that executes
-the rule. As for outputs of a rule, these should only ever be put in
-`autogenComponentModulesDir` or `componentBuildDir`, and the rule should declare
-this choice ahead of time. (It would also be possible to let the build system
-choose the output directory entirely.)
+the rule. The same logic applies to rule outputs, as the build-system chooses
+where the outputs should live.
 
 This is why we have:
 
 ```haskell
 data Dependency
   = ProjectFile !FilePath
-  | RuleResult !RuleResultRef
-type ResolvedDependency = ( FilePath, FilePath )
-
 data Result
   = AutogenFile !FilePath
   | BuildFile !FilePath
+type ResolvedLocation = ( FilePath, FilePath )
 ```
 
 ## Splitting off `Rule` and `Action`
@@ -65,7 +61,7 @@ data Rule =
     , actionId :: !ActionId
     }
 
-data Action = Action { action :: [ ResolvedDependency ] -> IO () }
+data Action = Action { action :: [ ResolvedLocation ] -> [ ResolvedLocation ] -> IO () }
 ```
 
 If we remove the indirection `Rule -> ActionId -> Action`, and make explicit
@@ -77,7 +73,9 @@ data
   Rule
     { dependencies :: ![ Dependency ]
     , results :: ![ Result ]
-    , runAction :: [ ResolvedDependency ] -> IO [ ResultArtifact ]
+    , runAction :: [ ResolvedLocation ] -- ^ locations of dependencies
+                -> [ ResolvedLocation ] -- ^ desired locations of results
+                -> IO [ ]
     }
 ```
 

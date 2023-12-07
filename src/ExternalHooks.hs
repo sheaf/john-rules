@@ -10,7 +10,7 @@ module ExternalHooks where
 import Data.Foldable
   ( for_ )
 import Data.Maybe
-  ( listToMaybe, mapMaybe )
+  ( mapMaybe )
 import System.Environment
   ( getArgs )
 
@@ -29,11 +29,11 @@ import qualified Data.Graph as Graph
 import Data.Map.Strict
   ( Map )
 import qualified Data.Map.Strict as Map
-  ( assocs, lookup )
+  ( assocs, lookup, toList )
 
 -- john-rules
 import CabalStubs
-  ( ModuleName, PreBuildComponentInputs )
+  ( PreBuildComponentInputs )
 import Rules
 
 --------------------------------------------------------------------------------
@@ -56,63 +56,76 @@ hooksExecutable ( Rules { rules, actions} ) = do
           --   - for each rule, what its dependencies are, and what Action to run to execute it
           runHookHandle
             \ cabalBuildInfoStuff -> do
-              runSmallIO $ runRulesM $ rules cabalBuildInfoStuff
+              (_, ruleFromId) <- runSmallIO $ runRulesM $ rules cabalBuildInfoStuff
+              return ruleFromId
         "runPreBuildAction" ->
           -- Execute a pre-build action, given its ActionId and ActionArg.
           runHookHandle
-            \ (cabalBuildInfoStuff, actId, actionArgData) -> do
+            \ (cabalBuildInfoStuff, actId, depLocs, resLocs) -> do
             let allActions = actions cabalBuildInfoStuff
             case Map.lookup actId allActions of
               Nothing -> error $ "hooksExecutable: no such action " ++ show actId
               Just ( Action f ) ->
-                runBigIO $ f ( Binary.decode actionArgData )
+                runBigIO $ f depLocs resLocs
         _ -> error $ "hooksExecutable: invalid hook name " ++ hookName
 
 runPreBuildRules
   :: PreBuildComponentInputs
-  -> ( PreBuildComponentInputs -> ActionId -> [ResolvedDependency] -> IO () )
+  -> ( PreBuildComponentInputs -> ActionId -> [ ResolvedLocation ] -> [ ResolvedLocation ] -> IO () )
     -- ^ how to run an individual action
-  -> ( PreBuildComponentInputs -> IO ( Map ModuleName RuleId, Map RuleId Rule ) )
+  -> ( PreBuildComponentInputs -> IO ( Map RuleId Rule ) )
     -- ^ all pre-build rules
   -> IO ()
 runPreBuildRules buildInfoStuff runAction getAllRules = do
-  ( _modRules, ruleFromId ) <- getAllRules buildInfoStuff
+  ruleFromId <- getAllRules buildInfoStuff
   let
     ( ruleGraph, ruleFromVertex, _vertexIdFromRuleId ) =
       Graph.graphFromEdges
-        [ ( rule, rId, ruleDeps )
-        | ( rId, rule@( Rule { dependencies = allDeps } ) ) <- Map.assocs ruleFromId
-        , let ruleDeps =
-                mapMaybe
-                  ( \case { RuleResult ( RuleResultRef { ruleId = i } ) -> Just i; ProjectFile {} -> Nothing} )
-                   allDeps
+        [ ( rule, rId, getRuleDependencies =<< dependencies rule )
+        | ( rId, rule ) <- Map.assocs ruleFromId
         ]
-    resolveDep :: RuleId -> Dependency -> IO ResolvedDependency
-    resolveDep baseRuleId = \case
+
+    -- The 'Rule' dependencies that a given 'Dependency' transitively incurs.
+    getRuleDependencies :: Dependency -> [ RuleId ]
+    getRuleDependencies = \case
+      ProjectFile fp ->
+        mapMaybe
+          ( \ ( rId, r ) -> if r `ruleOutputsPath` fp then Just rId else Nothing )
+            ( Map.toList ruleFromId )
+
+    resolveDep :: Dependency -> IO ResolvedLocation
+    resolveDep = \case
       ProjectFile fp -> do
-        basePath <- case buildInfoStuff of { _ -> return "src" } -- TODO: look for fp in the search paths and find the base path
+        basePath <- case buildInfoStuff of { _ -> return "src" } -- search in search paths
         return (basePath, fp)
-      RuleResult ( RuleResultRef { ruleId = depRuleId, ruleResultIndex = i } ) ->
-        case Map.lookup depRuleId ruleFromId of
-          Nothing -> error $ "runPreBuildRules: rule " ++ show baseRuleId ++ " depends on non-existent rule " ++ show depRuleId
-          Just ( Rule { results = depResults }) ->
-            case listToMaybe $ drop ( fromIntegral i ) depResults of
-              Nothing -> error $ unlines
-                [ "runPreBuildRules: rule " ++ show baseRuleId ++ " depends on output " ++ show i ++ "of rule " ++ show depRuleId ++ ","
-                , "but that rule only has " ++ show (length depResults) ++ " outputs." ]
-              Just res -> case res of
-                AutogenFile fp -> return ("autogenComponentModulesDir" {- stub -}, fp)
-                BuildFile fp -> return ("componentBuildDir" {- stub -}, fp)
+    resolveRes :: Result -> IO ResolvedLocation
+    resolveRes = \case
+      AutogenFile fp -> do
+        basePath <- case buildInfoStuff of { _ -> return "autogenComponentModulesDir" }
+        return (basePath, fp)
+      BuildFile fp -> do
+        basePath <- case buildInfoStuff of { _ -> return "componentBuildDir" }
+        return (basePath, fp)
 
   for_ ( Graph.reverseTopSort ruleGraph ) \ v -> do
-    let ( Rule { actionId = actId, dependencies = deps }, rId, _ ) = ruleFromVertex v
-    resolvedDeps <- traverse (resolveDep rId) deps
-    runAction buildInfoStuff actId resolvedDeps
+    let ( Rule { actionId = actId, dependencies = deps, results = rs }, _, _ )
+          = ruleFromVertex v
+    resolvedDeps <- traverse resolveDep deps
+    resolvedRs <- traverse resolveRes rs
+    runAction buildInfoStuff actId resolvedDeps resolvedRs
 
   -- On-demand recompilation: when some of the 'ProjectFile' inputs
   -- specified in the 'ruleFromId' map are modified:
   --   - rerun 'getRules' (as the dependency graph may have changed)
   --   - execute the part of the build graph that is now stale
+
+-- | Does the rule output the given file?
+ruleOutputsPath :: Rule -> FilePath -> Bool
+ruleOutputsPath ( Rule { results = rs } ) fp = any matches rs
+  where
+    matches = \case
+      AutogenFile fp' -> fp == fp'
+      BuildFile   fp' -> fp == fp'
 
 -- | Run a hook executable, passing inputs via stdin
 -- and getting results from stdout.
