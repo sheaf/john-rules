@@ -9,7 +9,6 @@
 --
 module Rules
   ( -- * Rules
-    -- ** Rule
     Rule(..), RuleId(..)
 
     -- ** Rule inputs/outputs
@@ -26,13 +25,16 @@ module Rules
   , registerRule, registerAction
 
   -- ** Local name generation (for t'RuleId' and t'ActionId')
-  , FreshT, runFreshT, hoist
+  , FreshT, hoist
 
   -- ** Placeholders (for the design phase)
   , SmallIO(..), BigIO(..)
 
   -- ** Debugging
   , getRules
+
+  -- ** Internal functions
+  , runFreshT, computeRules
   )
   where
 
@@ -247,6 +249,15 @@ runFreshT = ( `runStateT` Map.empty ) . freshT
 
 type RulesT = FreshT Rule RuleId
 type ActionsM = FreshT Action ActionId Identity
+
+computeRules
+  :: inputs
+  -> Rules inputs outputs
+  -> ( Map ActionId Action, IO ( outputs, Map RuleId Rule ) )
+computeRules inputs ( Rules { rules = rs } ) =
+  ( actionFromId, runSmallIO $ runFreshT rulesT )
+  where
+    (rulesT, actionFromId) = runIdentity $ runFreshT $ rs inputs
 
 -- These newtypes are placeholders meant to help keep track of effects
 -- during the design of the API.
