@@ -29,6 +29,10 @@ import qualified Data.Set as Set
 import System.FilePath
   ( (<.>), (</>) )
 
+-- transformers
+import Control.Monad.Trans.Class
+  ( MonadTrans(..) )
+
 -- john-rules
 import CabalStubs
   ( ModuleName(..), PreBuildComponentInputs
@@ -43,45 +47,36 @@ import Rules
 
 stackRules :: PreBuildRules
 stackRules = Rules
-  { actions = \ _ ->
-      let
-        genBuildModAction =
-          Action $ \ _ (stackBuildLoc:_) -> writeStackBuildFile stackBuildLoc
-      in Map.fromList [ ( genBuildModActionId, genBuildModAction ) ]
-  , rules = \ buildInfoStuff ->
-      void $ registerRule $
+  { rules = \ buildInfoStuff -> do
+      genBuildModActionId <- registerAction $
+        Action $ \ _ (stackBuildLoc:_) -> writeStackBuildFile stackBuildLoc
+      return $ void $ registerRule $
         Rule
           { dependencies = []
           , actionId = genBuildModActionId
           , results = [ AutogenFile $ toFilePath (stackBuildModule buildInfoStuff) ]
           }
   }
-  where
-    genBuildModActionId = ActionId 1
 
 -- Example 2: preprocessing using c2hs.
 
 chsRules :: PreBuildRules
 chsRules = Rules
-  { actions = \ buildInfoStuff ->
-      let
-        runChsAction =
-          Action $ \ (inputChsLoc:_inputChiLocs) (outputHsLoc:outputChiLoc:_) ->
+  { rules = \ buildInfoStuff -> do
+      chsActionId <- registerAction $
+        Action $ \ (inputChsLoc:_inputChiLocs) (outputHsLoc:outputChiLoc:_) ->
             runChs buildInfoStuff inputChsLoc outputHsLoc outputChiLoc
-      in Map.fromList [ ( chsActionId, runChsAction ) ]
-  , rules = \ buildInfoStuff -> do
-      chsGraph <- liftFresh $ callChsForDeps buildInfoStuff
-      hoist ( pure . runIdentity ) $ chsRulesFromGraph chsActionId chsGraph
+      return $ do
+        chsGraph <- lift $ callChsForDeps buildInfoStuff
+        hoist ( pure . runIdentity ) $ chsRulesFromGraph chsActionId chsGraph
   }
-  where
-    chsActionId = ActionId 2
 
 chsRulesFromGraph :: ActionId
                   -> Map ModuleName (Set ModuleName)
-                  -> FreshT Identity ()
+                  -> FreshT Rule RuleId Identity ()
 chsRulesFromGraph chsActionId chsGraph =
 --mfix $ \ mods ->
-    for_ (Map.toList chsGraph) \ (chsMod, chiDeps) -> do
+    for_ ( Map.toList chsGraph ) \ (chsMod, chiDeps) -> do
       let modPath = toFilePath chsMod <.> "chs"
       registerRule $
         Rule

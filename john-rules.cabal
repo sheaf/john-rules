@@ -23,13 +23,16 @@ common common
     DeriveAnyClass
     DeriveGeneric
     DerivingStrategies
+    DerivingVia
     FlexibleInstances
     GeneralisedNewtypeDeriving
     LambdaCase
     NamedFieldPuns
     RankNTypes
+    StandaloneDeriving
     TupleSections
     TypeApplications
+    TypeOperators
 
 library
 
