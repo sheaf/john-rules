@@ -27,7 +27,7 @@ import qualified Data.Set as Set
 
 -- filepath
 import System.FilePath
-  ( (<.>), (</>) )
+  ( (<.>) )
 
 -- transformers
 import Control.Monad.Trans.Class
@@ -48,13 +48,20 @@ import Rules
 stackRules :: PreBuildRules
 stackRules = Rules
   { rules = \ buildInfoStuff -> do
+      let
+        files = case buildInfoStuff of
+          _ -> [ ( AutogenFile, "Build_Stack.hs")
+               , ( AutogenFile, "Other/Stuff.hs")
+               ]
       genBuildModActionId <- registerAction $
-        Action $ \ _ (stackBuildLoc:_) -> writeStackBuildFile stackBuildLoc
+        Action $ \ _ ( ResultDirs resDir ) ->
+          for_ files \ ( fileTy, modNm ) ->
+            writeModuleFile buildInfoStuff ( resDir fileTy, modNm )
       return $ void $ registerRule $
         Rule
           { dependencies = []
           , actionId = genBuildModActionId
-          , results = [ AutogenFile $ toFilePath (stackBuildModule buildInfoStuff) ]
+          , results = files
           }
   }
 
@@ -64,8 +71,8 @@ chsRules :: PreBuildRules
 chsRules = Rules
   { rules = \ buildInfoStuff -> do
       chsActionId <- registerAction $
-        Action $ \ (inputChsLoc:_inputChiLocs) (outputHsLoc:outputChiLoc:_) ->
-            runChs buildInfoStuff inputChsLoc outputHsLoc outputChiLoc
+        Action $ \ (inputChsLoc:_inputChiLocs) resDirs ->
+            runChs buildInfoStuff inputChsLoc resDirs
       return $ do
         chsGraph <- lift $ callChsForDeps buildInfoStuff
         hoist ( pure . runIdentity ) $ chsRulesFromGraph chsActionId chsGraph
@@ -85,8 +92,8 @@ chsRulesFromGraph chsActionId chsGraph =
                            | chiDep <- Set.toList chiDeps
                         -- , let depId = mods Map.! chiDep
                            ]
-          , results = [ AutogenFile $ toFilePath chsMod <.> "hs"
-                      , BuildFile $ toFilePath chsMod <.> "chi"
+          , results = [ (AutogenFile, toFilePath chsMod <.> "hs")
+                      , (BuildFile, toFilePath chsMod <.> "chi")
                       ]
           , actionId = chsActionId
           }
@@ -95,13 +102,9 @@ chsRulesFromGraph chsActionId chsGraph =
 -- Stub functions for the examples.
 
 -- Example 1: ex-nihilo module generation (stack).
-writeStackBuildFile :: ResolvedLocation -> BigIO ()
-writeStackBuildFile (modDir, modNm) = BigIO $
-  putStrLn $ "Stub: I will write Build_Stack.hs to " ++ (modDir </> modNm)
-
-stackBuildModule :: PreBuildComponentInputs -> ModuleName
-stackBuildModule _ = ModuleName "Build_Stack"
-  -- In practice this is something like: "Build_" ++ exeName exe
+writeModuleFile :: PreBuildComponentInputs -> ResolvedLocation -> BigIO ()
+writeModuleFile _cabalBuildInfoStuff (modDir, modNm) = BigIO $
+  putStrLn $ "Stub: I will write " ++ modNm ++ " into directory " ++ modDir
 
 -- Example 2: c2hs preprocessing.
 
@@ -117,10 +120,9 @@ callChsForDeps _ = SmallIO $ do
 
 runChs :: PreBuildComponentInputs
        -> ResolvedLocation -- ^ location of input @.chs@ file
-       -> ResolvedLocation -- ^ desired location of output @.hs@ file
-       -> ResolvedLocation -- ^ desired location of output @.chi@ file
+       -> ResultDirs -- ^ directories in which to put outputs
        -> BigIO ()
-runChs _buildInfoStuff _ _ _ = BigIO $
+runChs _buildInfoStuff _ _ = BigIO $
   putStrLn $ unlines
     [ "Stub call to 'c2hs' executable."
     -- The file on which to call "c2hs" is: baseDir </> chsPath <.> "chs"

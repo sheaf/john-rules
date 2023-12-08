@@ -41,11 +41,9 @@ where the outputs should live.
 This is why we have:
 
 ```haskell
-data Dependency
-  = ProjectFile !FilePath
-data Result
-  = AutogenFile !FilePath
-  | BuildFile !FilePath
+data Dependency = ProjectFile !FilePath
+data ResultLocation = AutogenFile | BuildFile
+type Result = ( ResultLocation, FilePath )
 type ResolvedLocation = ( FilePath, FilePath )
 ```
 
@@ -76,7 +74,8 @@ data Rule =
     , actionId :: !ActionId
     }
 
-data Action = Action { action :: [ ResolvedLocation ] -> [ ResolvedLocation ] -> IO () }
+data Action = Action { action :: [ ResolvedLocation ] -> ResultDirs -> IO () }
+newtype ResultDirs = ResultDirs { resultDir :: ResultLocation -> FilePath }
 ```
 
 If we remove the indirection `Rule -> ActionId -> Action`, and make explicit
@@ -89,24 +88,26 @@ data
     { dependencies :: ![ Dependency ]
     , results :: ![ Result ]
     , runAction :: [ ResolvedLocation ] -- ^ locations of dependencies
-                -> [ ResolvedLocation ] -- ^ desired locations of results
+                -> ResultDirs -- ^ directories in which the action results are expected
                 -> IO [ ]
     }
 ```
 
-with the length of dependencies and of results matching.  
+with the length of dependencies matching.  
 What's happening is that we declare dependencies, on either a path like
 `"Lib.Mod.y"` or the output of another rule, and Cabal will resolve this
 dependency, finding the full filepath of this dependency.
 
-For results, we promise ahead of time to only write files in two places:
+The `ResultDirs` tells the action where it should put its results. It would
+be possible to follow the same structure as for the inputs, but in practice
+this leads to a lot of redundant information being passed; so we opt instead
+to simply pass some overall directories in which the different kinds of results
+are expected.
 
-  - in the correct `autogenComponentModulesDir`, e.g. when we're generating a `.hs` file,
-  - in the correct `componentBuildDir`, e.g. when we're generating `.chi` files
-    as part of running `c2hs` on a bunch of `.chs` files that depend on eachother.
+### Action vs ActionId
 
-The reason we are adding this indirection is that it enables running individual
-actions on demand.
+The reason we are adding the indirection through `ActionId` is that it enables
+running individual actions on demand.
 
 Workflow when e.g. some files change on disk:
 
@@ -114,17 +115,32 @@ Workflow when e.g. some files change on disk:
  - based on this new dependency information, we re-run the rules
    that have gone stale.
 
-We want to be able to execute the rules of our choice; so in the `Rules`
-datatype, we separately compute `Action`s and `Rule`s:
+If a `Rule` directly stored the `Action`, we would have to serialise/deserialise
+the actions (see the implementation of `hooksExecutable`), which would
+complicate things further.
+
+
+## Rules and names
+
+The basic design of fine-grained rules is:
 
 ```haskell
 data Rules inputs outputs
   = Rules
-  { rules :: inputs -> RulesM outputs
-  , actions :: inputs -> Map ActionId Action
-  }
+    { rules :: inputs -> IO (Map RuleId Rule)
+    , actions :: inputs -> Map ActionId Action
+    }
 ```
 
-If we didn't do this, and instead a `Rule` directly stored the `Action`,
-we would have to serialise/deserialise the actions (see the implementation
-of `hooksExecutable`), which would complicate things further.
+This allows us to separately compute rules and actions, for the two different
+kinds of invocations of the separate hooks executable.
+
+The `IO` in the return type of `rules :: inputs -> IO (Map RuleId Rule)` allows
+us a limited form of dynamic dependencies. For example, we can query an external
+tool such as `ghc -M` to determine dependency structure among source files, and
+then use that information to generate the rules.
+We still want the actions to be statically known, so that we can call out to
+the separate hooks executable to run an action without repeatedly running the
+`IO` action that is required to compute the rules.
+
+One issue with this API is that it requires users to come up with

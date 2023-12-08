@@ -73,7 +73,7 @@ hooksExecutable ( Rules { rules } ) = do
 
 runPreBuildRules
   :: PreBuildComponentInputs
-  -> ( PreBuildComponentInputs -> ActionId -> [ ResolvedLocation ] -> [ ResolvedLocation ] -> IO () )
+  -> ( PreBuildComponentInputs -> ActionId -> ActionFunction )
     -- ^ how to run an individual action
   -> ( PreBuildComponentInputs -> IO ( Map RuleId Rule ) )
     -- ^ all pre-build rules
@@ -100,34 +100,30 @@ runPreBuildRules buildInfoStuff runAction getAllRules = do
       ProjectFile fp -> do
         basePath <- case buildInfoStuff of { _ -> return "src" } -- search in search paths
         return (basePath, fp)
-    resolveRes :: Result -> IO ResolvedLocation
-    resolveRes = \case
-      AutogenFile fp -> do
-        basePath <- case buildInfoStuff of { _ -> return "autogenComponentModulesDir" }
-        return (basePath, fp)
-      BuildFile fp -> do
-        basePath <- case buildInfoStuff of { _ -> return "componentBuildDir" }
-        return (basePath, fp)
+    resDirs :: ResultDirs
+    resDirs = ResultDirs \case
+      AutogenFile ->
+        "autogenComponentModulesDir"
+      BuildFile ->
+        "componentBuildDir"
 
   for_ ( Graph.reverseTopSort ruleGraph ) \ v -> do
-    let ( Rule { actionId = actId, dependencies = deps, results = rs }, _, _ )
+    let ( Rule { actionId = actId, dependencies = deps }, _, _ )
           = ruleFromVertex v
     resolvedDeps <- traverse resolveDep deps
-    resolvedRs <- traverse resolveRes rs
-    runAction buildInfoStuff actId resolvedDeps resolvedRs
+    runBigIO $ runAction buildInfoStuff actId resolvedDeps resDirs
 
   -- On-demand recompilation: when some of the 'ProjectFile' inputs
   -- specified in the 'ruleFromId' map are modified:
   --   - rerun 'getRules' (as the dependency graph may have changed)
   --   - execute the part of the build graph that is now stale
+  --
+  -- Note that this does not handle e.g. adding a new .chs file entirely;
+  -- in that case we expect the user to re-configure first.
 
 -- | Does the rule output the given file?
 ruleOutputsPath :: Rule -> FilePath -> Bool
-ruleOutputsPath ( Rule { results = rs } ) fp = any matches rs
-  where
-    matches = \case
-      AutogenFile fp' -> fp == fp'
-      BuildFile   fp' -> fp == fp'
+ruleOutputsPath ( Rule { results = rs } ) fp = any ( (== fp) . snd ) rs
 
 -- | Run a hook executable, passing inputs via stdin
 -- and getting results from stdout.
