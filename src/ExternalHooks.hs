@@ -9,6 +9,8 @@ module ExternalHooks where
 -- base
 import Data.Foldable
   ( for_ )
+import Data.List
+  ( nub )
 import Data.Maybe
   ( mapMaybe )
 import System.Environment
@@ -34,6 +36,8 @@ import qualified Data.Map.Strict as Map
 -- john-rules
 import CabalStubs
   ( PreBuildComponentInputs )
+import Monitor
+  ( MonitorFileOrDir(..) )
 import Rules
 
 --------------------------------------------------------------------------------
@@ -56,7 +60,7 @@ hooksExecutable ( Rules { rules, actions } ) = do
           --   - for each rule, what its dependencies are, and what Action to run to execute it
           runHookHandle
             \ cabalBuildInfoStuff -> do
-              (_, ruleFromId) <- runSmallIO $ rules cabalBuildInfoStuff
+              ruleFromId <- runSmallIO $ rules cabalBuildInfoStuff
               return ruleFromId
         "runPreBuildAction" ->
           -- Execute a pre-build action, given its ActionId and ActionArg.
@@ -81,32 +85,50 @@ runPreBuildRules buildInfoStuff runAction getAllRules = do
   let
     ( ruleGraph, ruleFromVertex, _vertexIdFromRuleId ) =
       Graph.graphFromEdges
-        [ ( rule, rId, getRuleDependencies =<< dependencies rule )
+        [ ( rule, rId, getRuleDependencies rule )
         | ( rId, rule ) <- Map.assocs ruleFromId
         ]
 
-    -- The 'Rule' dependencies that a given 'Dependency' transitively incurs.
-    getRuleDependencies :: Dependency -> [ RuleId ]
-    getRuleDependencies = \case
-      ProjectFile fp ->
-        mapMaybe
-          ( \ ( rId, r ) -> if r `ruleOutputsPath` fp then Just rId else Nothing )
-            ( Map.toList ruleFromId )
+    -- All the other rules that a given rule directly depends on, as determined
+    -- by its 'unresolvedDependencies' and 'monitored' fields.
+    getRuleDependencies :: Rule -> [ RuleId ]
+    getRuleDependencies
+      ( Rule { unresolvedDependencies = deps
+             , monitoredFiles = mons } )
+      = nub $ concat $
+          [ mapMaybe
+            ( \ ( rId, r ) -> if r `ruleOutputsPath` fp then Just rId else Nothing )
+              ( Map.toList ruleFromId )
+          | dep <- deps
+          , let fp = case dep of { ProjectSearchDirFile _ path -> path } ]
+          ++
+          [ mapMaybe
+            ( \ ( rId, r ) ->
+                case mon of
+                  MonitorFile _ fp
+                    | r `ruleOutputsPath` fp
+                    -> Just rId
+                  MonitorDirContents loc
+                    | r `ruleOutputsAtLocation` loc
+                    -> Just rId
+                  _ -> Nothing )
+              ( Map.toList ruleFromId )
+          | mon <- mons ]
 
-    resolveDep :: Dependency -> IO ResolvedLocation
+    resolveDep :: UnresolvedDependency -> IO ResolvedLocation
     resolveDep = \case
-      ProjectFile fp -> do
+      ProjectSearchDirFile _ fp -> do
         basePath <- case buildInfoStuff of { _ -> return "src" } -- search in search paths
         return (basePath, fp)
-    resDirs :: ResultDirs
-    resDirs = ResultDirs \case
-      AutogenFile ->
+    resDirs :: ResolvedLocations
+    resDirs = ResolvedLocations \case
+      SrcFile ->
         "autogenComponentModulesDir"
       BuildFile ->
         "componentBuildDir"
 
   for_ ( Graph.reverseTopSort ruleGraph ) \ v -> do
-    let ( Rule { actionId = actId, dependencies = deps }, _, _ )
+    let ( Rule { actionId = actId, unresolvedDependencies = deps }, _, _ )
           = ruleFromVertex v
     resolvedDeps <- traverse resolveDep deps
     runBigIO $ runAction buildInfoStuff actId resolvedDeps resDirs
@@ -122,6 +144,10 @@ runPreBuildRules buildInfoStuff runAction getAllRules = do
 -- | Does the rule output the given file?
 ruleOutputsPath :: Rule -> FilePath -> Bool
 ruleOutputsPath ( Rule { results = rs } ) fp = any ( (== fp) . snd ) rs
+
+-- | Does the rule output files at the given location?
+ruleOutputsAtLocation :: Rule -> Location -> Bool
+ruleOutputsAtLocation ( Rule { results = rs } ) loc = any ( (== loc) . fst ) rs
 
 -- | Run a hook executable, passing inputs via stdin
 -- and getting results from stdout.

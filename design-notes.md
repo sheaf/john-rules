@@ -176,6 +176,45 @@ Whenever any of these changes, we must then:
      that executable in order to run the `Action` associated to each stale
      rule.
 
-Note that, in the case that the user adds a new file, nothing will trigger
-and we will not re-run the action that computes rules. This is okay, as we
-expect the user to re-configure their package at that point.
+A rule is considered **out-of-date** if one of the following conditions applies:
+
+  O1. an `unresolvedDependency` of the rule has been modified/created/deleted,
+  O2. the environment passed to the rule has changed,
+  O3. there has been a relevant change in a file or directory monitored
+    by the rule, as specified by `monitoredFiles`.
+
+If any rule is out-of-date, we re-run the computation that computes
+all rules. Once this is done, we compute which rules are stale.
+
+A rule is considered **stale** if, after re-running the computation of all
+of the rules, one of the following conditions applies:
+
+  S1. an `unresolvedDependency` of the rule has been
+      modified/created/deleted,
+  S2. the monitor value is stale, i.e. either:
+    a. the `monitoredValue` of the rule changed, or
+    b. the rule declares `monitoredValue = Nothing`,
+  S3. a transitive dependency of the rule is stale.
+
+A stale rule becomes no longer stale once we run its associated action; the
+build system is responsible for re-running the actions associated with
+each stale rule, in dependency order.
+
+Justification:
+
+  - (O1)/(S1) are clear. If we change a file that a rule depends on,
+    the rule needs to be re-run. Because the dependency structure might also
+    change, we need to recompute all the rules first, before then re-running
+    the ones that have been staled.
+  - (O2) is also clear: if we change the environment, we need to re-compute
+    the rules as it is implemented as a function from an environment.
+  - (S2) is an optimisation that ensures we don't pessimistically re-run a rule
+    every time we change the environment, but only when the monitored value changes.
+  - (O3) covers the use case in which we invoke an external tool (such as
+    `ghc -M`) which performs a search in order to compute a dependency graph.
+    We want to ensure that, if the user adds a new module, we
+    re-run this dependency computation. We don't want to rely on the user
+    necessarily re-configuring the package, especially as the package description
+    might not necessarily have changed (even though in common cases one expects
+    that adding a new source file would correspond to a new module declared in
+    the cabal file).

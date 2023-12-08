@@ -15,6 +15,10 @@ import Data.Foldable
 import Data.Functor.Identity
   ( Identity(..) )
 
+-- binary
+import qualified Data.Binary as Binary
+  ( encode )
+
 -- containers
 import Data.Map.Strict
   ( Map )
@@ -39,6 +43,7 @@ import CabalStubs
   ( ModuleName(..), PreBuildComponentInputs
   , toFilePath
   )
+import Monitor
 import Rules
 
 --------------------------------------------------------------------------------
@@ -50,16 +55,22 @@ stackRules :: PreBuildRules
 stackRules = fromRulesM $ RulesM \ buildInfoStuff -> do
   let
     files = case buildInfoStuff of
-      _ -> [ ( AutogenFile, "Build_Stack.hs")
-           , ( AutogenFile, "Other/Stuff.hs")
+      _ -> [ ( SrcFile, "Build_Stack.hs" )
+           , ( SrcFile, "Other/Stuff.hs" )
            ]
   genBuildModActionId <- registerAction $
-    Action $ \ _ ( ResultDirs resDir ) ->
+    Action $ \ _ ( ResolvedLocations resDir ) ->
       for_ files \ ( fileTy, modNm ) ->
         writeModuleFile buildInfoStuff ( resDir fileTy, modNm )
   return $ void $ registerRule $
     Rule
-      { dependencies = []
+      { unresolvedDependencies = []
+      , monitoredFiles = []
+      , monitoredValue =
+          Just $ case buildInfoStuff of { _ -> Binary.encode 'x' }
+            -- We want to monitor the projection out of 'PackageDescription'
+            -- that we care about, so that this rule gets rerun when this
+            -- changes.
       , actionId = genBuildModActionId
       , results = files
       }
@@ -82,14 +93,19 @@ chsRulesFromGraph chsActionId chsGraph =
 --mfix $ \ mods ->
     for_ ( Map.toList chsGraph ) \ (chsMod, chiDeps) -> do
       let modPath = toFilePath chsMod <.> "chs"
+          fileDeps = ProjectSearchDirFile SrcFile modPath
+                   : [ ProjectSearchDirFile BuildFile $ toFilePath chiDep <.> "chi"
+                     | chiDep <- Set.toList chiDeps
+                  -- , let depId = mods Map.! chiDep
+                     ]
       registerRule $
         Rule
-          { dependencies = ProjectFile modPath
-                         : [ ProjectFile $ toFilePath chiDep <.> "chi"
-                           | chiDep <- Set.toList chiDeps
-                        -- , let depId = mods Map.! chiDep
-                           ]
-          , results = [ (AutogenFile, toFilePath chsMod <.> "hs")
+          { unresolvedDependencies = fileDeps
+          , monitoredFiles = [ MonitorDirContents SrcFile ]
+             -- Monitor source files dirs, so that if a user adds a new .chs
+             -- file we know to re-run the "chs -M" computation.
+          , monitoredValue = Just (Binary.encode ())
+          , results = [ (SrcFile, toFilePath chsMod <.> "hs")
                       , (BuildFile, toFilePath chsMod <.> "chi")
                       ]
           , actionId = chsActionId
@@ -117,7 +133,7 @@ callChsForDeps _ = SmallIO $ do
 
 runChs :: PreBuildComponentInputs
        -> ResolvedLocation -- ^ location of input @.chs@ file
-       -> ResultDirs -- ^ directories in which to put outputs
+       -> ResolvedLocations -- ^ directories in which to put outputs
        -> BigIO ()
 runChs _buildInfoStuff _ _ = BigIO $
   putStrLn $ unlines

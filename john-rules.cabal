@@ -50,6 +50,7 @@ library
     CabalStubs
     Examples
     ExternalHooks
+    Monitor
 
   default-language:
     Haskell2010

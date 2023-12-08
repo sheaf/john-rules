@@ -54,8 +54,8 @@ import Rules
 --    the rule declares dependencies;
 --  - the action called by a rule should output the results described by
 --    the rule.
-newtype RulesM inputs outputs
-  = RulesM { runRulesM :: inputs -> ActionsM ( RulesT SmallIO outputs ) }
+newtype RulesM env
+  = RulesM { runRulesM :: env -> ActionsM ( RulesT SmallIO () ) }
     -- ^ Return a collection of t'Action's and their t'ActionId's, and then,
     -- in the inner computation, a collection of t'RuleId's, with each t'RuleId'
     -- associated with a corresponding 'Rule' which specifies its dependencies
@@ -64,22 +64,13 @@ newtype RulesM inputs outputs
     --
     -- You can think of this type signature as:
     --
-    -- > inputs -> ( Map ActionId Action, IO ( outputs, Map RuleId Rule ) )
+    -- > inputs -> ( Map ActionId Action, IO ( Map RuleId Rule ) )
     --
     -- except that it is structured in such a way as to avoid having
     -- to manually create t'ActionId' and t'RuleId' values.
 
-instance Functor ( RulesM inputs ) where
-  fmap f ( RulesM r ) = RulesM \ inputs -> fmap ( fmap f ) ( r inputs )
-instance Applicative ( RulesM inputs ) where
-  pure o = RulesM \ _ -> pure ( pure o )
-  ( RulesM f ) <*> ( RulesM a ) =
-    RulesM \ inputs ->
-      liftA2 (<*>) ( f inputs ) ( a inputs )
--- NB: no Monad instance.
-
 -- | Warning: this 'Semigroup' instance is not commutative.
-instance Semigroup outputs => Semigroup ( RulesM inputs outputs ) where
+instance Semigroup ( RulesM env ) where
   ( RulesM rs1 ) <> ( RulesM rs2 ) =
     RulesM \ inputs -> do
       x1 <- rs1 inputs
@@ -89,8 +80,8 @@ instance Semigroup outputs => Semigroup ( RulesM inputs outputs ) where
          y2 <- x2
          return $ y1 <> y2
 
-instance Monoid outputs => Monoid ( RulesM inputs outputs ) where
-  mempty = RulesM \ _ -> pure $ pure mempty
+instance Monoid ( RulesM env ) where
+  mempty = RulesM \ _ -> pure $ pure ()
 
 -- | A monad transformer for the registration of values, through the creation
 -- of fresh identifiers for these values.
@@ -102,7 +93,7 @@ runFreshT = ( `runStateT` Map.empty ) . freshT
 type RulesT = FreshT Rule RuleId
 type ActionsM = FreshT Action ActionId Identity
 
-fromRulesM :: RulesM inputs outputs -> Rules inputs outputs
+fromRulesM :: RulesM env -> Rules env
 fromRulesM m =
   Rules
     { rules   = \ inputs -> snd $ computeRules inputs m
@@ -110,11 +101,11 @@ fromRulesM m =
     }
 
 computeRules
-  :: inputs
-  -> RulesM inputs outputs
-  -> ( Map ActionId Action, SmallIO ( outputs, Map RuleId Rule ) )
+  :: env
+  -> RulesM env
+  -> ( Map ActionId Action, SmallIO ( Map RuleId Rule ) )
 computeRules inputs ( RulesM rs ) =
-  ( actionFromId, runFreshT rulesT )
+  ( actionFromId, fmap snd $ runFreshT rulesT )
   where
     ( rulesT, actionFromId ) = runIdentity $ runFreshT $ rs inputs
 
