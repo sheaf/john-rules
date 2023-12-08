@@ -21,29 +21,13 @@ module Rules
   , Action(..), ActionFunction
   , ActionId(..), ResolvedLocation, ResultDirs(..)
 
-  -- * Rules API
-  , ActionsM, RulesT
-  , registerRule, registerAction
-
-  -- ** Local name generation (for t'RuleId' and t'ActionId')
-  , FreshT, hoist
-
-  -- ** Placeholders (for the design phase)
+  -- * Placeholders (for the design phase)
   , SmallIO(..), BigIO(..)
 
-  -- ** Debugging
-  , getRules
-
-  -- ** Internal functions
-  , runFreshT, computeRules
   )
   where
 
 -- base
-import Control.Monad.Fix
-  ( MonadFix )
-import Data.Functor.Identity
-  ( Identity(..) )
 import Data.Word
   ( Word64 )
 import GHC.Generics
@@ -59,13 +43,7 @@ import qualified Data.Binary as Binary
 import Data.Map.Strict
   ( Map )
 import qualified Data.Map.Strict as Map
-  ( empty, insert, lookupMax )
-
--- transformers
-import Control.Monad.Trans.Class
-  ( MonadTrans(..) )
-import Control.Monad.Trans.State.Strict
-  ( StateT(..), get, put )
+  ( empty )
 
 -- john-rules
 import CabalStubs
@@ -223,10 +201,8 @@ data Action = Action { action :: ActionFunction }
 -- The @outputs@ type parameter represents what the rules are generating,
 -- for example a map from Haskell source module to the 'Rule' that generates it.
 --
--- Actions are registered using 'registerAction', and rules are registered
--- using 'registerRule'. Even though 'Rule's and t'Action's are registered
--- separately, they must jointly satisfy the following preconditions
--- (see t'Rule'):
+-- Even though 'Rule's and t'Action's are specified separately, they must
+-- jointly satisfy the following preconditions (see t'Rule'):
 --
 --  - the action called by a rule should expect as many arguments as
 --    the rule declares dependencies;
@@ -234,62 +210,28 @@ data Action = Action { action :: ActionFunction }
 --    the rule.
 data Rules inputs outputs
   = Rules
-  { rules :: inputs -> ActionsM ( RulesT SmallIO outputs ) }
-    -- ^ Return a collection of t'Action's and their t'ActionId's, and then,
-    -- in the inner computation, a collection of t'RuleId's, with each t'RuleId'
-    -- associated with a corresponding 'Rule' which specifies its dependencies
-    -- as well as the t'ActionId' of the t'Action' to run in order to execute
-    -- the rule.
-    --
-    -- You can think of this type signature as:
-    --
-    -- > inputs -> ( Map ActionId Action, IO ( outputs, Map RuleId Rule ) )
-    --
-    -- except that it is structured in such a way as to avoid having
-    -- to manually create t'ActionId' and t'RuleId' values.
-
-instance Functor ( Rules inputs ) where
-  fmap f ( Rules r ) = Rules \ inputs -> fmap ( fmap f ) ( r inputs )
-instance Applicative ( Rules inputs ) where
-  pure o = Rules \ _ -> pure ( pure o )
-  ( Rules f ) <*> ( Rules a ) =
-    Rules \ inputs ->
-      liftA2 (<*>) ( f inputs ) ( a inputs )
--- NB: no Monad instance.
+    { rules :: inputs -> SmallIO ( outputs, Map RuleId Rule )
+       -- ^ The computation of all rules, with their dependency structure.
+    , actions :: inputs -> Map ActionId Action
+       -- ^ The actions that execute the rules.
+    }
 
 -- | Warning: this 'Semigroup' instance is not commutative.
 instance Semigroup outputs => Semigroup ( Rules inputs outputs ) where
-  ( Rules { rules = rs1 } ) <> ( Rules { rules = rs2 } ) =
+  ( Rules { rules = rs1, actions = as1 } ) <>
+    ( Rules { rules = rs2, actions = as2 } ) =
     Rules
-      { rules = \ inputs -> do
+      { rules = \inputs -> do
          x1 <- rs1 inputs
          x2 <- rs2 inputs
-         return $ do
-            y1 <- x1
-            y2 <- x2
-            return $ y1 <> y2 }
+         return $ x1 <> x2
+     , actions = \ inputs -> as1 inputs <> as2 inputs }
 
 instance Monoid outputs => Monoid ( Rules inputs outputs ) where
-  mempty = Rules { rules = \ _ -> pure $ pure mempty }
-
--- | A monad transformer for the registration of values, through the creation
--- of fresh identifiers for these values.
-newtype FreshT x x_id m a = FreshT { freshT :: StateT ( Map x_id x ) m a }
-  deriving newtype ( Functor, Applicative, Monad, MonadTrans, MonadFix )
-runFreshT :: FreshT x x_id m a -> m ( a, Map x_id x )
-runFreshT = ( `runStateT` Map.empty ) . freshT
-
-type RulesT = FreshT Rule RuleId
-type ActionsM = FreshT Action ActionId Identity
-
-computeRules
-  :: inputs
-  -> Rules inputs outputs
-  -> ( Map ActionId Action, IO ( outputs, Map RuleId Rule ) )
-computeRules inputs ( Rules { rules = rs } ) =
-  ( actionFromId, runSmallIO $ runFreshT rulesT )
-  where
-    (rulesT, actionFromId) = runIdentity $ runFreshT $ rs inputs
+  mempty =
+    Rules { rules = \ _ -> pure mempty
+          , actions = \ _ -> Map.empty
+          }
 
 -- These newtypes are placeholders meant to help keep track of effects
 -- during the design of the API.
@@ -304,48 +246,3 @@ newtype SmallIO a = SmallIO { runSmallIO :: IO a }
 -- | PreBuildRules declare how a certain collection of modules in a
 -- given component of a package will be generated.
 type PreBuildRules = Rules PreBuildComponentInputs () -- ( Map ModuleName RuleId )
-
---------------------------------------------------------------------------------
--- API functions
-
-hoist :: ( forall u. n u -> m u )
-      -> FreshT x x_id n a -> FreshT x x_id m a
-hoist h ( FreshT ( StateT f ) ) = FreshT $ StateT $ \ s -> h $ f s
-
-register :: ( Monad m, Ord x_id )
-         => x_id -> ( x_id -> x_id )
-         -> x -> FreshT x x_id m x_id
-register zeroId succId rule = FreshT do
-  oldRules <- get
-  let newId
-        | Just ( x_id, _ ) <- Map.lookupMax oldRules
-        = succId x_id
-        | otherwise
-        = zeroId
-      !newRules = Map.insert newId rule oldRules
-  put newRules
-  return newId
-
--- | Register a rule. Returns a unique identifier for that rule.
-registerRule :: Monad m => Rule -> FreshT Rule RuleId m RuleId
-registerRule = register ( RuleId 1 ) ( \ ( RuleId i ) -> RuleId ( i + 1 ) )
-
--- | Register an action. Returns a unique identifier for that action.
-registerAction :: Monad m => Action -> FreshT Action ActionId m ActionId
-registerAction = register ( ActionId 1 ) ( \ ( ActionId i ) -> ActionId ( i + 1 ) )
-
-{-# INLINABLE registerRule #-}
-{-# INLINABLE registerAction #-}
-{-# SPECIALISE
-      registerRule :: Rule -> FreshT Rule RuleId SmallIO RuleId
-  #-}
-{-# SPECIALISE
-      registerAction :: Action -> FreshT Action ActionId Identity ActionId
-  #-}
-
--- | Convenience function to return all 'Rule's stored in 'Rules'.
---
--- Useful for debugging.
-getRules :: inputs -> Rules inputs outputs -> IO ( outputs, Map RuleId Rule )
-getRules inputs ( Rules { rules = rulesFromInputs } ) =
-  runSmallIO $ runFreshT $ fst $ runIdentity $ runFreshT $ rulesFromInputs inputs

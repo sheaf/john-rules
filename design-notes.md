@@ -119,7 +119,6 @@ If a `Rule` directly stored the `Action`, we would have to serialise/deserialise
 the actions (see the implementation of `hooksExecutable`), which would
 complicate things further.
 
-
 ## Rules and names
 
 The basic design of fine-grained rules is:
@@ -143,4 +142,19 @@ We still want the actions to be statically known, so that we can call out to
 the separate hooks executable to run an action without repeatedly running the
 `IO` action that is required to compute the rules.
 
-One issue with this API is that it requires users to come up with
+One issue with this API is that it requires users to come up with names
+themselves, which isn't robust when one wants to combine hooks. Instead, we
+provide an API in which one registers actions and rules within a monad, so that
+the name structure is correct by construction:
+
+```haskell
+newtype RulesM inputs outputs
+  = RulesM { runRulesM :: inputs -> ActionsM ( RulesT IO outputs ) }
+
+newtype FreshT x x_id m a = FreshT { freshT :: StateT ( Map x_id x ) m a }
+type RulesT = FreshT Rule RuleId
+type ActionsM = FreshT Action ActionId Identity
+
+registerRule :: Monad m => Rule -> FreshT Rule RuleId m RuleId
+registerAction :: Monad m => Action -> FreshT Action ActionId m ActionId
+```

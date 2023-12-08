@@ -9,8 +9,6 @@ module ExternalHooks where
 -- base
 import Data.Foldable
   ( for_ )
-import Data.Functor.Identity
-  ( Identity(..) )
 import Data.Maybe
   ( mapMaybe )
 import System.Environment
@@ -45,7 +43,7 @@ import Rules
 -- then reads arguments to the hook over stdin and writes the results of the hook
 -- to stdout.
 hooksExecutable :: PreBuildRules -> IO ()
-hooksExecutable ( Rules { rules } ) = do
+hooksExecutable ( Rules { rules, actions } ) = do
   args <- getArgs
   case args of
     [] -> error "hooksExecutable: missing argument"
@@ -58,13 +56,13 @@ hooksExecutable ( Rules { rules } ) = do
           --   - for each rule, what its dependencies are, and what Action to run to execute it
           runHookHandle
             \ cabalBuildInfoStuff -> do
-              (_, ruleFromId) <- runSmallIO $ runFreshT $ fst $ runIdentity $ runFreshT $ rules cabalBuildInfoStuff
+              (_, ruleFromId) <- runSmallIO $ rules cabalBuildInfoStuff
               return ruleFromId
         "runPreBuildAction" ->
           -- Execute a pre-build action, given its ActionId and ActionArg.
           runHookHandle
             \ (cabalBuildInfoStuff, actId, depLocs, resLocs) -> do
-            let allActions = snd $ runIdentity $ runFreshT $ rules cabalBuildInfoStuff
+            let allActions = actions cabalBuildInfoStuff
             case Map.lookup actId allActions of
               Nothing -> error $ "hooksExecutable: no such action " ++ show actId
               Just ( Action f ) ->

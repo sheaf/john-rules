@@ -34,6 +34,7 @@ import Control.Monad.Trans.Class
   ( MonadTrans(..) )
 
 -- john-rules
+import API
 import CabalStubs
   ( ModuleName(..), PreBuildComponentInputs
   , toFilePath
@@ -46,37 +47,33 @@ import Rules
 -- Example 1: generating modules ex-nihilo (e.g. stack)
 
 stackRules :: PreBuildRules
-stackRules = Rules
-  { rules = \ buildInfoStuff -> do
-      let
-        files = case buildInfoStuff of
-          _ -> [ ( AutogenFile, "Build_Stack.hs")
-               , ( AutogenFile, "Other/Stuff.hs")
-               ]
-      genBuildModActionId <- registerAction $
-        Action $ \ _ ( ResultDirs resDir ) ->
-          for_ files \ ( fileTy, modNm ) ->
-            writeModuleFile buildInfoStuff ( resDir fileTy, modNm )
-      return $ void $ registerRule $
-        Rule
-          { dependencies = []
-          , actionId = genBuildModActionId
-          , results = files
-          }
-  }
+stackRules = fromRulesM $ RulesM \ buildInfoStuff -> do
+  let
+    files = case buildInfoStuff of
+      _ -> [ ( AutogenFile, "Build_Stack.hs")
+           , ( AutogenFile, "Other/Stuff.hs")
+           ]
+  genBuildModActionId <- registerAction $
+    Action $ \ _ ( ResultDirs resDir ) ->
+      for_ files \ ( fileTy, modNm ) ->
+        writeModuleFile buildInfoStuff ( resDir fileTy, modNm )
+  return $ void $ registerRule $
+    Rule
+      { dependencies = []
+      , actionId = genBuildModActionId
+      , results = files
+      }
 
 -- Example 2: preprocessing using c2hs.
 
 chsRules :: PreBuildRules
-chsRules = Rules
-  { rules = \ buildInfoStuff -> do
-      chsActionId <- registerAction $
-        Action $ \ (inputChsLoc:_inputChiLocs) resDirs ->
-            runChs buildInfoStuff inputChsLoc resDirs
-      return $ do
-        chsGraph <- lift $ callChsForDeps buildInfoStuff
-        hoist ( pure . runIdentity ) $ chsRulesFromGraph chsActionId chsGraph
-  }
+chsRules = fromRulesM $ RulesM \ buildInfoStuff -> do
+  chsActionId <- registerAction $
+    Action $ \ (inputChsLoc:_inputChiLocs) resDirs ->
+        runChs buildInfoStuff inputChsLoc resDirs
+  return $ do
+    chsGraph <- lift $ callChsForDeps buildInfoStuff
+    hoist ( pure . runIdentity ) $ chsRulesFromGraph chsActionId chsGraph
 
 chsRulesFromGraph :: ActionId
                   -> Map ModuleName (Set ModuleName)

@@ -43,6 +43,7 @@ library
     src
 
   exposed-modules:
+    API
     Rules
 
   other-modules:
