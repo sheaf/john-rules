@@ -158,3 +158,24 @@ type ActionsM = FreshT Action ActionId Identity
 registerRule :: Monad m => Rule -> FreshT Rule RuleId m RuleId
 registerAction :: Monad m => Action -> FreshT Action ActionId m ActionId
 ```
+
+## Rule demand
+
+HLS wants to know which rules need to rerun, and when.
+
+The general flow is that we can find, by traversing the `Map RuleId Rule`
+returned from querying all pre-build rules from the external hooks executable,
+what all the dependencies of rules are (e.g. `Parser.y`).  
+Whenever any of these changes, we must then:
+
+  1. Re-query the pre-build rules to obtain all up-to-date rules. This step
+     is necessary because the dependency structure might have changed.
+  2. Find out all the rules that are now stale and need to be re-run.
+  3. Re-run each of these rules by calling out to the separate hooks
+     executable, passing the `ActionId` and additional action arguments to
+     that executable in order to run the `Action` associated to each stale
+     rule.
+
+Note that, in the case that the user adds a new file, nothing will trigger
+and we will not re-run the action that computes rules. This is okay, as we
+expect the user to re-configure their package at that point.
