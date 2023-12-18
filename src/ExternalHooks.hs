@@ -4,7 +4,11 @@
 -- This module tests that the Rules API is fit for purpose, i.e. that we can
 -- properly implement a separate hooks executable and a build system on the
 -- back of the design.
-module ExternalHooks where
+module ExternalHooks
+  ( hooksExecutable
+  , executeRules
+  )
+  where
 
 -- base
 import Data.Foldable
@@ -28,14 +32,10 @@ import qualified Data.ByteString.Lazy as LBS
 
 -- containers
 import qualified Data.Graph as Graph
-import Data.Map.Strict
-  ( Map )
 import qualified Data.Map.Strict as Map
-  ( assocs, lookup, toList )
+  ( lookup )
 
 -- john-rules
-import CabalStubs
-  ( PreBuildComponentInputs )
 import Monitor
   ( MonitorFileOrDir(..) )
 import Rules
@@ -47,7 +47,7 @@ import Rules
 -- then reads arguments to the hook over stdin and writes the results of the hook
 -- to stdout.
 hooksExecutable :: PreBuildRules -> IO ()
-hooksExecutable ( Rules { rules, actions } ) = do
+hooksExecutable pbRules = do
   args <- getArgs
   case args of
     [] -> error "hooksExecutable: missing argument"
@@ -60,45 +60,44 @@ hooksExecutable ( Rules { rules, actions } ) = do
           --   - for each rule, what its dependencies are, and what Action to run to execute it
           runHookHandle
             \ cabalBuildInfoStuff -> do
-              ruleFromId <- runSmallIO $ rules cabalBuildInfoStuff
-              return ruleFromId
+              let (_, ruleFromId) = computeRules cabalBuildInfoStuff pbRules
+              runSmallIO ruleFromId
         "runPreBuildAction" ->
           -- Execute a pre-build action, given its ActionId and ActionArg.
           runHookHandle
             \ (cabalBuildInfoStuff, actId, depLocs, resLocs) -> do
-            let allActions = actions cabalBuildInfoStuff
-            case Map.lookup actId allActions of
+            let (actionFromId, _) = computeRules cabalBuildInfoStuff pbRules
+            case Map.lookup actId actionFromId of
               Nothing -> error $ "hooksExecutable: no such action " ++ show actId
               Just ( Action f ) ->
                 runBigIO $ f depLocs resLocs
         _ -> error $ "hooksExecutable: invalid hook name " ++ hookName
 
-runPreBuildRules
-  :: PreBuildComponentInputs
-  -> ( PreBuildComponentInputs -> ActionId -> ActionFunction )
-    -- ^ how to run an individual action
-  -> ( PreBuildComponentInputs -> IO ( Map RuleId Rule ) )
-    -- ^ all pre-build rules
+executeRules
+  :: Rules inputs
+  -> inputs
   -> IO ()
-runPreBuildRules buildInfoStuff runAction getAllRules = do
-  ruleFromId <- getAllRules buildInfoStuff
+executeRules rulesFromInputs inputs = do
+  let (actionFromId, getRules) = computeRules inputs rulesFromInputs
+  -- Get all the rules, and create a build graph out of them.
+  allRules <- zip [0..] <$> runSmallIO getRules
   let
-    ( ruleGraph, ruleFromVertex, _vertexIdFromRuleId ) =
+    ( ruleGraph, ruleFromVertex, _vertexFromRuleId ) =
       Graph.graphFromEdges
         [ ( rule, rId, getRuleDependencies rule )
-        | ( rId, rule ) <- Map.assocs ruleFromId
+        | ( rId, rule ) <- allRules
         ]
 
     -- All the other rules that a given rule directly depends on, as determined
     -- by its 'unresolvedDependencies' and 'monitored' fields.
-    getRuleDependencies :: Rule -> [ RuleId ]
+    getRuleDependencies :: Rule -> [ Int ]
     getRuleDependencies
       ( Rule { unresolvedDependencies = deps
              , monitoredFiles = mons } )
       = nub $ concat $
           [ mapMaybe
             ( \ ( rId, r ) -> if r `ruleOutputsPath` fp then Just rId else Nothing )
-              ( Map.toList ruleFromId )
+              allRules
           | dep <- deps
           , let fp = case dep of { ProjectSearchDirFile _ path -> path } ]
           ++
@@ -112,13 +111,13 @@ runPreBuildRules buildInfoStuff runAction getAllRules = do
                     | r `ruleOutputsAtLocation` loc
                     -> Just rId
                   _ -> Nothing )
-              ( Map.toList ruleFromId )
+              allRules
           | mon <- mons ]
 
     resolveDep :: UnresolvedDependency -> IO ResolvedLocation
     resolveDep = \case
       ProjectSearchDirFile _ fp -> do
-        basePath <- case buildInfoStuff of { _ -> return "src" } -- search in search paths
+        basePath <- return "src" -- search in search paths
         return (basePath, fp)
     resDirs :: ResolvedLocations
     resDirs = ResolvedLocations \case
@@ -126,12 +125,25 @@ runPreBuildRules buildInfoStuff runAction getAllRules = do
         "autogenComponentModulesDir"
       BuildFile ->
         "componentBuildDir"
+      TmpFile ->
+        "componentTmpDir"
 
   for_ ( Graph.reverseTopSort ruleGraph ) \ v -> do
-    let ( Rule { actionId = actId, unresolvedDependencies = deps }, _, _ )
+    let ( Rule { actionId = actId, unresolvedDependencies = deps }, ruleId, _ )
           = ruleFromVertex v
-    resolvedDeps <- traverse resolveDep deps
-    runBigIO $ runAction buildInfoStuff actId resolvedDeps resDirs
+    case Map.lookup actId actionFromId of
+      Nothing ->
+        -- This is an internal error, because we don't expose the constructor
+        -- of 'ActionId' through the SetupHooks interface, so it shouldn't
+        -- be possible to conjure up invalid 'ActionId's (unless one is
+        -- deliberately trying to cause trouble, e.g. by using unsafeCoerce).
+        error $ unlines
+          [ "Internal error when trying to execute rule " ++ show ruleId ++ ":"
+          , "there is no Action with " ++ show actId ++ "." ]
+      Just (Action { action = execRule }) -> do
+        -- Run the rule, passing it the resolved locations it expects.
+        resolvedDeps <- traverse resolveDep deps
+        runBigIO $ execRule resolvedDeps resDirs
 
   -- On-demand recompilation: when some of the 'ProjectFile' inputs
   -- specified in the 'ruleFromId' map are modified:

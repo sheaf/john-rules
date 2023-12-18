@@ -14,6 +14,8 @@ import Data.Foldable
   ( for_ )
 import Data.Functor.Identity
   ( Identity(..) )
+import qualified Data.List.NonEmpty as NE
+  ( NonEmpty(..) )
 
 -- binary
 import qualified Data.Binary as Binary
@@ -36,6 +38,8 @@ import System.FilePath
 -- transformers
 import Control.Monad.Trans.Class
   ( MonadTrans(..) )
+import Control.Monad.Trans.Writer.CPS
+  ( WriterT )
 
 -- john-rules
 import API
@@ -52,12 +56,11 @@ import Rules
 -- Example 1: generating modules ex-nihilo (e.g. stack)
 
 stackRules :: PreBuildRules
-stackRules = fromRulesM $ RulesM \ buildInfoStuff -> do
+stackRules = rules $ \ buildInfoStuff -> do
   let
     files = case buildInfoStuff of
-      _ -> [ ( SrcFile, "Build_Stack.hs" )
-           , ( SrcFile, "Other/Stuff.hs" )
-           ]
+      _ ->      ( SrcFile, "Build_Stack.hs" )
+        NE.:| [ ( SrcFile, "Other/Stuff.hs" ) ]
   genBuildModActionId <- registerAction $
     Action $ \ _ ( ResolvedLocations resDir ) ->
       for_ files \ ( fileTy, modNm ) ->
@@ -78,17 +81,18 @@ stackRules = fromRulesM $ RulesM \ buildInfoStuff -> do
 -- Example 2: preprocessing using c2hs.
 
 chsRules :: PreBuildRules
-chsRules = fromRulesM $ RulesM \ buildInfoStuff -> do
+chsRules = rules $ \ buildInfoStuff -> do
   chsActionId <- registerAction $
-    Action $ \ (inputChsLoc:_inputChiLocs) resDirs ->
-        runChs buildInfoStuff inputChsLoc resDirs
+    Action $ \ inputLocs resDirs ->
+      let inputChsLoc = head inputLocs
+      in runChs buildInfoStuff inputChsLoc resDirs
   return $ do
     chsGraph <- lift $ callChsForDeps buildInfoStuff
     hoist ( pure . runIdentity ) $ chsRulesFromGraph chsActionId chsGraph
 
 chsRulesFromGraph :: ActionId
                   -> Map ModuleName (Set ModuleName)
-                  -> FreshT Rule RuleId Identity ()
+                  -> WriterT [Rule] Identity ()
 chsRulesFromGraph chsActionId chsGraph =
 --mfix $ \ mods ->
     for_ ( Map.toList chsGraph ) \ (chsMod, chiDeps) -> do
@@ -105,9 +109,8 @@ chsRulesFromGraph chsActionId chsGraph =
              -- Monitor source files dirs, so that if a user adds a new .chs
              -- file we know to re-run the "chs -M" computation.
           , monitoredValue = Just (Binary.encode ())
-          , results = [ (SrcFile, toFilePath chsMod <.> "hs")
-                      , (BuildFile, toFilePath chsMod <.> "chi")
-                      ]
+          , results =         (SrcFile  , toFilePath chsMod <.> "hs")
+                      NE.:| [ (BuildFile, toFilePath chsMod <.> "chi") ]
           , actionId = chsActionId
           }
 
